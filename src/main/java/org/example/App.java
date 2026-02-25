@@ -13,14 +13,11 @@ import org.ietf.jgss.GSSManager;
 import org.ietf.jgss.GSSName;
 import org.ietf.jgss.Oid;
 
-import javax.security.auth.Subject;
 import javax.security.auth.login.AppConfigurationEntry;
 import javax.security.auth.login.Configuration;
-import javax.security.auth.login.LoginContext;
 
 import java.net.InetAddress;
 import java.net.URI;
-import java.security.PrivilegedExceptionAction;
 import java.util.Base64;
 import java.util.HashMap;
 import java.util.Map;
@@ -46,27 +43,21 @@ public class App {
 
         String url = args[0];
 
+        // Let the JVM's internal GSS mechanism acquire credentials from the native cache
         System.setProperty("javax.security.auth.useSubjectCredsOnly", "false");
         System.setProperty("sun.security.krb5.debug", "true");
         System.setProperty("sun.security.spnego.debug", "true");
 
-        LoginContext loginContext = new LoginContext("kerb-client", null, null, jaasConfig());
-        loginContext.login();
-        Subject subject = loginContext.getSubject();
+        // Install JAAS config for the entry name that GSS-API uses internally
+        Configuration.setConfiguration(jaasConfig());
 
-        System.out.println("Logged in as: " + subject.getPrincipals());
-
-        Subject.doAs(subject, (PrivilegedExceptionAction<Void>) () -> {
-            doRequest(url);
-            return null;
-        });
-
-        loginContext.logout();
+        doRequest(url);
     }
 
     private static void doRequest(String url) throws Exception {
         URI uri = URI.create(url);
         String canonicalHost = InetAddress.getByName(uri.getHost()).getCanonicalHostName();
+
         GSSManager manager = GSSManager.getInstance();
         GSSName servicePrincipal = manager.createName(
                 "HTTP/" + canonicalHost, GSSName.NT_HOSTBASED_SERVICE);
@@ -130,22 +121,24 @@ public class App {
         return null;
     }
 
+    /**
+     * Provides JAAS config entries for the names that Java's GSS-API uses internally
+     * when useSubjectCredsOnly=false. The GSS mechanism performs the JAAS login itself,
+     * using the native ticket cache (Windows AD or kinit on Linux/macOS).
+     */
     private static Configuration jaasConfig() {
-        boolean isWindows = System.getProperty("os.name", "").toLowerCase().contains("win");
-
         return new Configuration() {
             @Override
             public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
                 Map<String, String> options = new HashMap<>();
-                options.put("isInitiator", "true");
-                options.put("doNotPrompt", "true");
                 options.put("useTicketCache", "true");
-                options.put("principal", "*");
+                options.put("doNotPrompt", "true");
                 options.put("refreshKrb5Config", "true");
+                options.put("isInitiator", "true");
 
-                if (isWindows) {
-                    options.put("ticketCache", "MSLSA:");
-                } else {
+                boolean isWindows = System.getProperty("os.name", "")
+                        .toLowerCase().contains("win");
+                if (!isWindows) {
                     options.put("renewTGT", "true");
                 }
 
