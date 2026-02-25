@@ -1,4 +1,4 @@
-tpackage org.example;
+package org.example;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -48,6 +48,12 @@ public class App {
         // Enable JVM-level Kerberos and SPNEGO debug output
         System.setProperty("sun.security.krb5.debug", "true");
         System.setProperty("sun.security.spnego.debug", "true");
+        // On Windows, try to discover realm/KDC from the USERDNSDOMAIN env var
+        String userDnsDomain = System.getenv("USERDNSDOMAIN");
+        if (userDnsDomain != null && System.getProperty("java.security.krb5.realm") == null) {
+            System.setProperty("java.security.krb5.realm", userDnsDomain.toUpperCase());
+            System.setProperty("java.security.krb5.kdc", userDnsDomain.toLowerCase());
+        }        System.setProperty("sun.security.spnego.debug", "true");
 
         // Log in via JAAS using the native ticket cache (Windows LSA or kinit file cache)
         LoginContext loginContext = new LoginContext("kerb-client", null, null, jaasConfig());
@@ -82,14 +88,27 @@ public class App {
         loginContext.logout();
     }
 
+
     private static Configuration jaasConfig() {
+        boolean isWindows = System.getProperty("os.name", "").toLowerCase().contains("win");
+
         return new Configuration() {
             @Override
             public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
                 Map<String, String> options = new HashMap<>();
                 options.put("useTicketCache", "true");
+                options.put("isInitiator", "true");
                 options.put("doNotPrompt", "true");
-                options.put("renewTGT", "true");
+
+                if (isWindows) {
+                    // Use the Windows native SSPI credential cache (logged-in AD user)
+                    options.put("useTicketCache", "true");
+                    options.put("ticketCache", "");
+                } else {
+                    // Use the file-based ticket cache from kinit on Linux/macOS
+                    options.put("useTicketCache", "true");
+                    options.put("renewTGT", "true");
+                }
 
                 return new AppConfigurationEntry[]{
                         new AppConfigurationEntry(
