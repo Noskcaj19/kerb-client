@@ -1,28 +1,32 @@
 package org.example;
 
-import org.apache.hc.client5.http.auth.AuthScope;
-import org.apache.hc.client5.http.auth.KerberosConfig;
-import org.apache.hc.client5.http.auth.StandardAuthScheme;
 import org.apache.hc.client5.http.classic.methods.HttpGet;
-import org.apache.hc.client5.http.config.RequestConfig;
-import org.apache.hc.client5.http.impl.auth.BasicCredentialsProvider;
-import org.apache.hc.client5.http.impl.auth.KerberosSchemeFactory;
-import org.apache.hc.client5.http.impl.auth.SPNegoSchemeFactory;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
 import org.apache.hc.client5.http.impl.classic.HttpClientBuilder;
 import org.apache.hc.core5.http.ClassicHttpResponse;
 import org.apache.hc.core5.http.HttpEntity;
-import org.apache.hc.core5.http.config.Registry;
-import org.apache.hc.core5.http.config.RegistryBuilder;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
-import org.apache.hc.client5.http.auth.AuthSchemeFactory;
-import org.apache.hc.client5.http.SystemDefaultDnsResolver;
 
-import java.io.Serializable;
-import java.security.Principal;
-import java.util.Arrays;
+import org.ietf.jgss.GSSContext;
+import org.ietf.jgss.GSSCredential;
+import org.ietf.jgss.GSSManager;
+import org.ietf.jgss.GSSName;
+import org.ietf.jgss.Oid;
+
+import java.net.URI;
+import java.util.Base64;
 
 public class App {
+
+    private static final Oid SPNEGO_OID;
+
+    static {
+        try {
+            SPNEGO_OID = new Oid("1.3.6.1.5.5.2");
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+    }
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
@@ -32,38 +36,21 @@ public class App {
 
         String url = args[0];
 
-        // Allow the JVM to use the system ticket cache (e.g. from kinit)
+        // Allow the JVM to use the system ticket cache (Windows AD or kinit)
         System.setProperty("javax.security.auth.useSubjectCredsOnly", "false");
+        // Enable JVM-level Kerberos and SPNEGO debug output
+        System.setProperty("sun.security.krb5.debug", "true");
+        System.setProperty("sun.security.spnego.debug", "true");
 
-        // Register SPNEGO and Kerberos auth scheme factories
-        Registry<AuthSchemeFactory> authSchemeRegistry = RegistryBuilder.<AuthSchemeFactory>create()
-                .register(StandardAuthScheme.SPNEGO, new SPNegoSchemeFactory(
-                        KerberosConfig.custom()
-                                .setStripPort(KerberosConfig.Option.ENABLE)
-                                .setUseCanonicalHostname(KerberosConfig.Option.DEFAULT)
-                                .build(),
-                        SystemDefaultDnsResolver.INSTANCE))
-                .register(StandardAuthScheme.KERBEROS, KerberosSchemeFactory.DEFAULT)
-                .build();
+        // Build the SPNEGO token for the target host
+        URI uri = URI.create(url);
+        String spnegoToken = generateSpnegoToken(uri.getHost());
 
-        // Use default credentials from the platform (Windows AD ticket cache or kinit on Linux)
-        BasicCredentialsProvider credentialsProvider = new BasicCredentialsProvider();
-        credentialsProvider.setCredentials(
-                new AuthScope(null, -1),
-                new UseJaasCredentials());
-
-        // Prefer SPNEGO negotiation
-        RequestConfig requestConfig = RequestConfig.custom()
-                .setTargetPreferredAuthSchemes(Arrays.asList(StandardAuthScheme.SPNEGO))
-                .build();
-
-        try (CloseableHttpClient httpClient = HttpClientBuilder.create()
-                .setDefaultAuthSchemeRegistry(authSchemeRegistry)
-                .setDefaultCredentialsProvider(credentialsProvider)
-                .setDefaultRequestConfig(requestConfig)
-                .build()) {
+        try (CloseableHttpClient httpClient = HttpClientBuilder.create().build()) {
 
             HttpGet request = new HttpGet(url);
+            request.setHeader("Authorization", "Negotiate " + spnegoToken);
+
             System.out.println("Requesting: " + url);
 
             try (ClassicHttpResponse response = httpClient.executeOpen(null, request, null)) {
@@ -77,20 +64,31 @@ public class App {
         }
     }
 
-    /**
-     * Credentials implementation that defers to the JAAS/native login context,
-     * letting the SPNEGO scheme use the platform's default Kerberos credentials
-     * (Windows AD ticket cache or kinit on Linux/macOS).
-     */
-    private static class UseJaasCredentials implements org.apache.hc.client5.http.auth.Credentials, Serializable {
-        @Override
-        public Principal getUserPrincipal() {
-            return null;
-        }
+    private static String generateSpnegoToken(String host) throws Exception {
+        GSSManager manager = GSSManager.getInstance();
 
-        @Override
-        public char[] getPassword() {
-            return null;
-        }
+        // Service principal: HTTP/hostname
+        GSSName servicePrincipal = manager.createName(
+                "HTTP/" + host, GSSName.NT_HOSTBASED_SERVICE);
+
+        GSSCredential clientCred = manager.createCredential(
+                null,
+                GSSCredential.DEFAULT_LIFETIME,
+                SPNEGO_OID,
+                GSSCredential.INITIATE_ONLY);
+
+        GSSContext context = manager.createContext(
+                servicePrincipal,
+                SPNEGO_OID,
+                clientCred,
+                GSSContext.DEFAULT_LIFETIME);
+
+        context.requestMutualAuth(false);
+        context.requestCredDeleg(false);
+
+        byte[] token = context.initSecContext(new byte[0], 0, 0);
+        context.dispose();
+
+        return Base64.getEncoder().encodeToString(token);
     }
 }
