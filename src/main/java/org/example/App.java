@@ -1,4 +1,4 @@
-package org.example;
+tpackage org.example;
 
 import org.apache.hc.client5.http.classic.methods.HttpGet;
 import org.apache.hc.client5.http.impl.classic.CloseableHttpClient;
@@ -8,13 +8,20 @@ import org.apache.hc.core5.http.HttpEntity;
 import org.apache.hc.core5.http.io.entity.EntityUtils;
 
 import org.ietf.jgss.GSSContext;
-import org.ietf.jgss.GSSCredential;
 import org.ietf.jgss.GSSManager;
 import org.ietf.jgss.GSSName;
 import org.ietf.jgss.Oid;
 
+import javax.security.auth.Subject;
+import javax.security.auth.login.AppConfigurationEntry;
+import javax.security.auth.login.Configuration;
+import javax.security.auth.login.LoginContext;
+
 import java.net.URI;
+import java.security.PrivilegedExceptionAction;
 import java.util.Base64;
+import java.util.HashMap;
+import java.util.Map;
 
 public class App {
 
@@ -42,45 +49,68 @@ public class App {
         System.setProperty("sun.security.krb5.debug", "true");
         System.setProperty("sun.security.spnego.debug", "true");
 
-        // Build the SPNEGO token for the target host
-        URI uri = URI.create(url);
-        String spnegoToken = generateSpnegoToken(uri.getHost());
+        // Log in via JAAS using the native ticket cache (Windows LSA or kinit file cache)
+        LoginContext loginContext = new LoginContext("kerb-client", null, null, jaasConfig());
+        loginContext.login();
+        Subject subject = loginContext.getSubject();
 
-        try (CloseableHttpClient httpClient = HttpClientBuilder.create().build()) {
+        System.out.println("Logged in as: " + subject.getPrincipals());
 
-            HttpGet request = new HttpGet(url);
-            request.setHeader("Authorization", "Negotiate " + spnegoToken);
+        // Run the HTTP request as the authenticated subject
+        Subject.doAs(subject, (PrivilegedExceptionAction<Void>) () -> {
+            URI uri = URI.create(url);
+            String spnegoToken = generateSpnegoToken(uri.getHost());
 
-            System.out.println("Requesting: " + url);
+            try (CloseableHttpClient httpClient = HttpClientBuilder.create().build()) {
+                HttpGet request = new HttpGet(url);
+                request.setHeader("Authorization", "Negotiate " + spnegoToken);
 
-            try (ClassicHttpResponse response = httpClient.executeOpen(null, request, null)) {
-                System.out.println("Status: " + response.getCode() + " " + response.getReasonPhrase());
+                System.out.println("Requesting: " + url);
 
-                HttpEntity entity = response.getEntity();
-                if (entity != null) {
-                    System.out.println(EntityUtils.toString(entity));
+                try (ClassicHttpResponse response = httpClient.executeOpen(null, request, null)) {
+                    System.out.println("Status: " + response.getCode() + " " + response.getReasonPhrase());
+
+                    HttpEntity entity = response.getEntity();
+                    if (entity != null) {
+                        System.out.println(EntityUtils.toString(entity));
+                    }
                 }
             }
-        }
+            return null;
+        });
+
+        loginContext.logout();
+    }
+
+    private static Configuration jaasConfig() {
+        return new Configuration() {
+            @Override
+            public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
+                Map<String, String> options = new HashMap<>();
+                options.put("useTicketCache", "true");
+                options.put("doNotPrompt", "true");
+                options.put("renewTGT", "true");
+
+                return new AppConfigurationEntry[]{
+                        new AppConfigurationEntry(
+                                "com.sun.security.auth.module.Krb5LoginModule",
+                                AppConfigurationEntry.LoginModuleControlFlag.REQUIRED,
+                                options)
+                };
+            }
+        };
     }
 
     private static String generateSpnegoToken(String host) throws Exception {
         GSSManager manager = GSSManager.getInstance();
 
-        // Service principal: HTTP/hostname
         GSSName servicePrincipal = manager.createName(
                 "HTTP/" + host, GSSName.NT_HOSTBASED_SERVICE);
-
-        GSSCredential clientCred = manager.createCredential(
-                null,
-                GSSCredential.DEFAULT_LIFETIME,
-                SPNEGO_OID,
-                GSSCredential.INITIATE_ONLY);
 
         GSSContext context = manager.createContext(
                 servicePrincipal,
                 SPNEGO_OID,
-                clientCred,
+                null, // use the credential from the JAAS subject
                 GSSContext.DEFAULT_LIFETIME);
 
         context.requestMutualAuth(false);
