@@ -4,8 +4,15 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.security.PrivilegedExceptionAction;
 import java.util.Base64;
+import java.util.HashMap;
 import java.util.Locale;
+import java.util.Map;
+import javax.security.auth.Subject;
+import javax.security.auth.login.AppConfigurationEntry;
+import javax.security.auth.login.Configuration;
+import javax.security.auth.login.LoginContext;
 import org.ietf.jgss.GSSContext;
 import org.ietf.jgss.GSSCredential;
 import org.ietf.jgss.GSSManager;
@@ -37,7 +44,7 @@ public class App {
             System.setProperty("sun.security.jgss.native", "true");
             System.setProperty("sun.security.spnego.msinterop", "true");
         }
-        byte[] token = createSpnegoToken(host);
+        byte[] token = isWindows() ? createSpnegoToken(host) : createSpnegoTokenFromLinuxTicketCache(host);
         String authorizationHeader = "Negotiate " + Base64.getEncoder().encodeToString(token);
 
         HttpRequest request = HttpRequest.newBuilder(uri)
@@ -80,6 +87,13 @@ public class App {
         }
     }
 
+    private static byte[] createSpnegoTokenFromLinuxTicketCache(String host) throws Exception {
+        LoginContext loginContext = new LoginContext("SpnegoLinux", null, null, new LinuxTicketCacheLoginConfig());
+        loginContext.login();
+        Subject subject = loginContext.getSubject();
+        return Subject.doAs(subject, (PrivilegedExceptionAction<byte[]>) () -> createSpnegoToken(host));
+    }
+
     private static byte[] initToken(GSSContext context) throws Exception {
         context.requestMutualAuth(true);
         context.requestCredDeleg(false);
@@ -105,6 +119,31 @@ public class App {
             return new Oid(value);
         } catch (Exception e) {
             throw new IllegalStateException("Invalid OID: " + value, e);
+        }
+    }
+
+    private static final class LinuxTicketCacheLoginConfig extends Configuration {
+        @Override
+        public AppConfigurationEntry[] getAppConfigurationEntry(String name) {
+            Map<String, String> options = new HashMap<>();
+            options.put("useTicketCache", "true");
+            options.put("doNotPrompt", "true");
+            options.put("renewTGT", "true");
+            options.put("refreshKrb5Config", "true");
+            options.put("isInitiator", "true");
+
+            String cacheFromEnv = System.getenv("KRB5CCNAME");
+            if (cacheFromEnv != null && cacheFromEnv.startsWith("FILE:")) {
+                options.put("ticketCache", cacheFromEnv.substring("FILE:".length()));
+            }
+
+            return new AppConfigurationEntry[] {
+                    new AppConfigurationEntry(
+                            "com.sun.security.auth.module.Krb5LoginModule",
+                            AppConfigurationEntry.LoginModuleControlFlag.REQUIRED,
+                            options
+                    )
+            };
         }
     }
 }
