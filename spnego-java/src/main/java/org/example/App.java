@@ -22,6 +22,7 @@ import org.ietf.jgss.Oid;
 public class App {
     private static final Oid SPNEGO_OID = oid("1.3.6.1.5.5.2");
     private static final Oid KRB5_OID = oid("1.2.840.113554.1.2.2");
+    private static final Oid KRB5_PRINCIPAL_NAME_OID = oid("1.2.840.113554.1.2.2.1");
 
     public static void main(String[] args) throws Exception {
         if (args.length < 1) {
@@ -63,9 +64,9 @@ public class App {
     }
 
     private static byte[] createSpnegoToken(String host) throws Exception {
-        String servicePrincipal = "HTTP/" + host.toLowerCase();
+        TargetName targetName = resolveServiceName(host);
         GSSManager manager = GSSManager.getInstance();
-        GSSName serverName = manager.createName(servicePrincipal, GSSName.NT_HOSTBASED_SERVICE);
+        GSSName serverName = manager.createName(targetName.value(), targetName.type());
 
         try {
             return initToken(manager.createContext(serverName, SPNEGO_OID, null, GSSContext.DEFAULT_LIFETIME));
@@ -113,6 +114,23 @@ public class App {
         String osName = System.getProperty("os.name", "");
         return osName.toLowerCase(Locale.ROOT).contains("win");
     }
+
+    private static TargetName resolveServiceName(String host) {
+        String principalOverride = System.getenv("SPNEGO_SERVICE_PRINCIPAL");
+        if (principalOverride != null && !principalOverride.isBlank()) {
+            return new TargetName(principalOverride, KRB5_PRINCIPAL_NAME_OID);
+        }
+
+        String hostBasedOverride = System.getenv("SPNEGO_SERVICE_NAME");
+        if (hostBasedOverride != null && !hostBasedOverride.isBlank()) {
+            return new TargetName(hostBasedOverride, GSSName.NT_HOSTBASED_SERVICE);
+        }
+
+        // NT_HOSTBASED_SERVICE format is "service@hostname".
+        return new TargetName("HTTP@" + host.toLowerCase(Locale.ROOT), GSSName.NT_HOSTBASED_SERVICE);
+    }
+
+    private record TargetName(String value, Oid type) {}
 
     private static Oid oid(String value) {
         try {
